@@ -1,0 +1,266 @@
+name: Database Services Testing
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-with-postgres:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Wait for PostgreSQL
+      run: |
+        until pg_isready -h localhost -p 5432; do
+          echo "Waiting for PostgreSQL..."
+          sleep 2
+        done
+        echo "PostgreSQL is ready!"
+    
+    - name: Run database migrations
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+      run: npm run migrate
+    
+    - name: Seed database
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+      run: npm run seed
+    
+    - name: Run tests
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+      run: npm test
+    
+    - name: Test database connection
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+      run: |
+        node -e "
+        const { Pool } = require('pg');
+        const pool = new Pool({
+          host: process.env.POSTGRES_HOST,
+          port: process.env.POSTGRES_PORT,
+          database: process.env.POSTGRES_DB,
+          user: process.env.POSTGRES_USER,
+          password: process.env.POSTGRES_PASSWORD
+        });
+        
+        pool.query('SELECT COUNT(*) FROM users').then(result => {
+          console.log('Users in database:', result.rows[0].count);
+          pool.end();
+        }).catch(console.error);
+        "
+
+  test-with-multiple-services:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Wait for services
+      run: |
+        echo "Waiting for PostgreSQL..."
+        until pg_isready -h localhost -p 5432; do
+          sleep 2
+        done
+        
+        echo "Waiting for Redis..."
+        until redis-cli -h localhost -p 6379 ping; do
+          sleep 2
+        done
+        
+        echo "All services are ready!"
+    
+    - name: Run migrations
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+      run: npm run migrate
+    
+    - name: Test with both services
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+        REDIS_URL: redis://localhost:6379
+      run: |
+        # サーバーをバックグラウンドで起動
+        npm start &
+        SERVER_PID=$!
+        
+        # サーバーの起動を待つ
+        sleep 5
+        
+        # ヘルスチェック
+        curl -f http://localhost:3000/health || exit 1
+        
+        # ユーザー作成テスト
+        curl -X POST -H "Content-Type: application/json" \
+             -d '{"name":"Test User","email":"test@example.com"}' \
+             http://localhost:3000/users
+        
+        # ユーザー取得テスト
+        curl -f http://localhost:3000/users
+        
+        # サーバー停止
+        kill $SERVER_PID
+    
+    - name: Redis functionality test
+      run: |
+        echo "Testing Redis functionality..."
+        redis-cli -h localhost -p 6379 set test_key "test_value"
+        redis-cli -h localhost -p 6379 get test_key
+        redis-cli -h localhost -p 6379 del test_key
+
+  test-matrix-databases:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        postgres-version: [13, 14, 15]
+        redis-version: [6, 7]
+    
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:${{ matrix.redis-version }}
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Test with PostgreSQL ${{ matrix.postgres-version }} and Redis ${{ matrix.redis-version }}
+      env:
+        POSTGRES_HOST: localhost
+        POSTGRES_PORT: 5432
+        POSTGRES_DB: testdb
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: password
+        REDIS_URL: redis://localhost:6379
+      run: |
+        echo "Testing with PostgreSQL ${{ matrix.postgres-version }} and Redis ${{ matrix.redis-version }}"
+        
+        # マイグレーション実行
+        npm run migrate
+        
+        # 基本的な接続テスト
+        npm test
+        
+        echo "Test completed successfully!"
